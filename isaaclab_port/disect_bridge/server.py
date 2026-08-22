@@ -63,6 +63,7 @@ class DisectSession:
             self.settings, "disect_bridge", requires_grad=False,
             best_params=self.best_params, device=self.device,
             verbose=False, shared_params=True)
+        sim.init_parameters()
         sim.init_sim_structures_()
         del sim.model
         sim.create_model_()
@@ -78,9 +79,13 @@ class DisectSession:
         sim = self.sim
         if self.initial_knife_pos is None:
             self.initial_knife_pos = np.asarray(pos, dtype=np.float32)
+        # ConstantLinearVelocityMotion evaluates initial_pos + t * v with
+        # ABSOLUTE sim time, so compensate to make the knife sit at `pos` now.
+        pos_t = torch.tensor(pos, device=self.device, dtype=torch.float32)
+        vel_t = torch.tensor(vel, device=self.device, dtype=torch.float32)
         sim.motion = ConstantLinearVelocityMotion(
-            initial_pos=torch.tensor(pos, device=self.device, dtype=torch.float32),
-            linear_velocity=torch.tensor(vel, device=self.device, dtype=torch.float32))
+            initial_pos=pos_t - sim.sim_time * vel_t,
+            linear_velocity=vel_t)
         for _ in range(substeps):
             sim.simulation_step()
         knife_f = sim.state.knife_f

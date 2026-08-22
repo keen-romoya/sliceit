@@ -47,6 +47,10 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     bridge_host = "127.0.0.1"
     bridge_port = 8299
     bridge_substeps = 100         # DiSECt steps (dt 4e-5) per policy step
+    # maps Isaac blade-edge height to DiSECt knife position:
+    # surface offset (isaac 0.07 vs disect sphere top 0.05) + knife spine
+    # half-height (DiSECt knife pos is the spine center, edge = pos + 0.029)
+    bridge_height_offset = 0.049
 
     # reward weights — port of cost_utils.slicing_with_vel
     w_dist = 1.0

@@ -49,9 +49,13 @@ def main():
         total_reward += rew
         if step % 20 == 0:
             f = env._latest_force
+            blade_h, blade_vel = env._blade_state()
+            ee = env._ee_pos_env()[0]
             print(f"[step {step:4d}] force max {f.max():6.2f} N | "
                   f"completion mean {env._cut_completion.mean():.2f} | "
-                  f"reward mean {rew.mean():.3f}")
+                  f"reward mean {rew.mean():.3f} | "
+                  f"ee=({ee[0]:.3f},{ee[1]:.3f},{ee[2]:.3f}) "
+                  f"blade_h={blade_h[0]:.3f} vz={blade_vel[0,2]:.3f}")
         if terminated.any() or truncated.any():
             done = (terminated | truncated).sum().item()
             print(f"[step {step:4d}] {done} env(s) done "

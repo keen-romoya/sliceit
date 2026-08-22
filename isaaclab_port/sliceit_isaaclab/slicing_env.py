@@ -98,13 +98,17 @@ class SlicingEnv(DirectRLEnv):
 
     def _apply_action(self):
         # damped least-squares IK: qdot = J^T (J J^T + lambda I)^-1 v
-        jac = self._robot.root_physx_view.get_jacobians()[:, self._ee_body_idx - 1, :, :]
-        jac = jac[:, :, :6]
+        # fixed-base articulation: jacobian row index is body index - 1
+        jac = self._robot.data.body_link_jacobian_w.torch[:, self._ee_body_idx - 1, :, :6]
         jjt = jac @ jac.transpose(1, 2)
         lam = (self.cfg.ik_damping ** 2) * torch.eye(6, device=self.device).unsqueeze(0)
         qdot = jac.transpose(1, 2) @ torch.linalg.solve(jjt + lam, self._cmd_twist.unsqueeze(-1))
-        q_target = self._robot.data.joint_pos[:, :6] + qdot.squeeze(-1) * self.cfg.sim.dt
-        self._robot.set_joint_position_target(q_target, joint_ids=self._arm_joint_ids)
+        # integrate a persistent target so PD actuators track the commanded
+        # velocity; clamp target-measured error to avoid windup on contact
+        q_meas = self._robot.data.joint_pos.torch[:, :6]
+        self._q_target = self._q_target + qdot.squeeze(-1) * self.cfg.sim.dt
+        self._q_target = q_meas + (self._q_target - q_meas).clamp(-0.08, 0.08)
+        self._robot.set_joint_position_target(self._q_target, joint_ids=self._arm_joint_ids)
 
         # cutting reaction force on the wrist from the DiSECt-derived model
         blade_h, blade_vel = self._blade_state()
@@ -120,10 +124,13 @@ class SlicingEnv(DirectRLEnv):
         self._latest_force = f_up
 
     def _bridge_force(self, blade_h, blade_vel):
-        ee_pos = self._ee_pos_env()[0]
-        # DiSECt cutting frame: y is up, knife descends along -y
-        pos = [float(ee_pos[0] - self.cfg.food_pos[0]), float(blade_h[0]), float(ee_pos[1])]
-        vel = [float(blade_vel[0, 0]), float(blade_vel[0, 2]), float(blade_vel[0, 1])]
+        # DiSECt cutting frame: y up, knife centered over the material.
+        # Lateral food<->robot registration (the cutting_board_disect TF in the
+        # Gazebo version) is collapsed to "blade centered" for now; height is
+        # mapped via the surface offset between the two scenes.
+        disect_y = float(blade_h[0]) - self.cfg.bridge_height_offset
+        pos = [0.0, disect_y, 0.0]
+        vel = [float(blade_vel[0, 0]), float(blade_vel[0, 2]), 0.0]
         out = self._bridge.step(pos, vel, substeps=self.cfg.bridge_substeps)
         f = torch.tensor([out["force_norm"]], device=self.device)
         c = torch.tensor([out["cut_completion"]], device=self.device)
@@ -132,13 +139,13 @@ class SlicingEnv(DirectRLEnv):
     # ------------------------------------------------------------------- obs
 
     def _ee_pos_env(self):
-        return (self._robot.data.body_pos_w[:, self._ee_body_idx]
+        return (self._robot.data.body_pos_w.torch[:, self._ee_body_idx]
                 - self.scene.env_origins)
 
     def _blade_state(self):
         ee_pos = self._ee_pos_env()
         blade_h = ee_pos[:, 2] - self._blade_offset[:, 2]
-        blade_vel = self._robot.data.body_lin_vel_w[:, self._ee_body_idx]
+        blade_vel = self._robot.data.body_lin_vel_w.torch[:, self._ee_body_idx]
         return blade_h, blade_vel
 
     def _get_observations(self) -> dict:
@@ -196,12 +203,15 @@ class SlicingEnv(DirectRLEnv):
 
     def _reset_idx(self, env_ids):
         super()._reset_idx(env_ids)
-        joint_pos = self._robot.data.default_joint_pos[env_ids].clone()
+        joint_pos = self._robot.data.default_joint_pos.torch[env_ids].clone()
         # start pose: blade above the food (tuned for UR10e reach)
         joint_pos[:, :6] = torch.tensor(
             [0.0, -1.2, 1.6, -1.97, -1.57, 0.0], device=self.device)
         self._robot.write_joint_state_to_sim(
             joint_pos, torch.zeros_like(joint_pos), env_ids=env_ids)
+        if not hasattr(self, "_q_target"):
+            self._q_target = torch.zeros((self.num_envs, 6), device=self.device)
+        self._q_target[env_ids] = joint_pos[:, :6]
         self._last_action[env_ids] = 0.0
         self._prev_ee_vel[env_ids] = 0.0
         self._prev_ee_acc[env_ids] = 0.0
