@@ -143,7 +143,12 @@ class SlicingEnv(DirectRLEnv):
         # velocity; clamp target-measured error to avoid windup on contact
         q_meas = self._robot.data.joint_pos.torch[:, :6]
         self._q_target = self._q_target + qdot.squeeze(-1) * self.cfg.sim.dt
-        self._q_target = q_meas + (self._q_target - q_meas).clamp(-0.015, 0.015)
+        # the clamp is effectively the task-space compliance stiffness: it
+        # caps how hard the PD can press (0.015 rad ceilinged EE force at
+        # ~17 N — below what the calibrated material needs at depth). 0.10
+        # allows ~110 N; breakthrough lunges are handled by the board ramp
+        # and the target energy dump below.
+        self._q_target = q_meas + (self._q_target - q_meas).clamp(-0.10, 0.10)
         # at board level, dump stored PD-target energy so the arm cannot
         # spring downward when the cutting force disappears
         at_board = (blade_h_now <= board_top + 0.004).unsqueeze(-1)
