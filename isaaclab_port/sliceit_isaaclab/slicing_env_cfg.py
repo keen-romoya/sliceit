@@ -24,9 +24,10 @@ class SlicingEnvCfg(DirectRLEnvCfg):
 
     robot: ArticulationCfg = UR10e_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
-    # cutting scene geometry (env-local frame)
-    board_pos = (0.7, 0.0, 0.01)
-    food_pos = (0.7, 0.0, 0.045)      # cucumber-proxy center
+    # cutting scene geometry (env-local frame), centered under the EE's
+    # start-pose position so the blade meets the food
+    board_pos = (0.87, 0.174, 0.01)
+    food_pos = (0.82, 0.174, 0.045)   # cucumber-proxy center
     food_size = (0.15, 0.04, 0.05)    # x-long cylinder proxy as a box
     food_surface_height = 0.07        # top of food, where cutting force engages
     completion_depth = 0.045          # blade travel through material = cut done

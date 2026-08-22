@@ -75,11 +75,14 @@ class SlicingEnv(DirectRLEnv):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.30, 0.55, 0.20)))
         food.func("/World/envs/env_0/Food", food, translation=self.cfg.food_pos)
 
+        # blade visual: plain (non-physics) prim whose USD xform we write each
+        # step — physics-tensor pose writes don't reach the renderer, USD
+        # xform writes do (same mechanism as USD-file playback)
         knife = sim_utils.CuboidCfg(
             size=self.cfg.knife_size,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.75, 0.75, 0.78)))
-        knife.func("/World/envs/env_0/Robot/wrist_3_link/Knife", knife,
-                   translation=(0.0, 0.0, 0.16))
+        knife.func("/World/envs/env_0/KnifeViz", knife, translation=(0.0, 0.0, 1.5))
+        self._knife_prim = None  # resolved lazily once the stage is live
 
         light = sim_utils.DomeLightCfg(intensity=2200.0)
         light.func("/World/light", light)
@@ -122,6 +125,21 @@ class SlicingEnv(DirectRLEnv):
         self._robot.set_external_force_and_torque(
             forces, torques, body_ids=[self._ee_body_idx])
         self._latest_force = f_up
+
+        # keep the blade visual glued below the wrist (USD write, env 0 only —
+        # a rendering aid, invisible to physics and the policy). The physics
+        # blade edge is a world-frame offset, so the visual hangs world-upright
+        # with its bottom edge at the same height the force model uses.
+        from pxr import Gf
+        if self._knife_prim is None:
+            from isaaclab.sim.utils.stage import get_current_stage
+            self._knife_prim = get_current_stage().GetPrimAtPath(
+                "/World/envs/env_0/KnifeViz")
+        ee_pos = self._robot.data.body_pos_w.torch[0, self._ee_body_idx]
+        half_blade = 0.5 * self.cfg.knife_size[2]
+        p = [float(ee_pos[0]), float(ee_pos[1]),
+             float(ee_pos[2]) - self.cfg.blade_edge_offset[2] + half_blade]
+        self._knife_prim.GetAttribute("xformOp:translate").Set(Gf.Vec3d(*p))
 
     def _bridge_force(self, blade_h, blade_vel):
         # DiSECt cutting frame: y up, knife centered over the material.
