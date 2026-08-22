@@ -23,5 +23,5 @@
 	branch = master
 [submodule "disect"]
     path = disect
-	url = https://github.com/omron-sinicx/DiSECt.git
-	branch = osx_devel
+	url = https://github.com/keen-romoya/DiSECt.git
+	branch = osx_devel-modernize
