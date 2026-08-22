@@ -60,7 +60,16 @@ def main():
 
     # numeric contact telemetry: verify blade/food intersection from sim
     # state per frame instead of judging rendered pixels
+    from sliceit_isaaclab.scene_checks import SceneChecker
+    checker = SceneChecker(cfg)
+    contact_started = False
     telemetry = []
+    if cfg.force_model == "bridge":
+        checker.begin_frame(-1)
+        pts_z = [p[2] for p in env._food_mesh.GetPointsAttr().Get()]
+        holes = checker.watertight(env._mesh_tris.tolist(), pts_z)
+        print(f"[audit] mesh watertight above bottom: "
+              f"{'yes' if holes == 0 else f'NO ({holes} boundary edges)'}")
     fl_c, fl_s = cfg.food_left_center, cfg.food_left_size
     food_aabb = (fl_c[0] - fl_s[0] / 2, cfg.food_right_center[0] + cfg.food_right_size[0] / 2,
                  fl_c[1] - fl_s[1] / 2, fl_c[1] + fl_s[1] / 2,
@@ -102,6 +111,17 @@ def main():
             # food geometry is the streamed DiSECt mesh: measure against it
             penetration = max(0.0, env._mesh_z_top - kz)
             clips = False  # the mesh is genuinely cut; no proxy to clip
+
+        # scene-vs-dynamics assertions (see scene_checks.py)
+        checker.begin_frame(step)
+        checker.blade_vs_board((vx0, vx1, by0, by1, vz0, vz1))
+        checker.blade_attachment(vz1, float(ee[2]))
+        if cfg.force_model == "bridge":
+            contact_started = contact_started or float(env._latest_force[0]) > 0.1
+            checker.mesh_on_board(env._mesh_z_min, env._mesh_xy_center)
+            checker.seam_integrity(env._weld_spread, contact_started)
+        else:
+            checker.solid_clip(clips)
         telemetry.append((step, kx, ky, kz, penetration,
                           float(env._cut_completion[0]), float(env._latest_force[0]),
                           int(clips)))
@@ -130,6 +150,11 @@ def main():
     print(f"CLIP: {len(clip_frames)}/{len(telemetry)} frames where the rendered "
           f"blade interpenetrates solid material"
           + (f" (first at frame {clip_frames[0][0]})" if clip_frames else ""))
+    print(checker.summary())
+    with open(args.out.replace(".mp4", "_violations.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "check", "magnitude"])
+        w.writerows(checker.rows())
     print("PLAY_OK")
     wrapped.close()
 

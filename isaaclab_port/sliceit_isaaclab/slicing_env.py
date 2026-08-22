@@ -113,6 +113,13 @@ class SlicingEnv(DirectRLEnv):
         v[:, 2] = -self.cfg.max_down_velocity * (0.5 * (self._last_action[:, 0] + 1.0))
         v[:, 1] = (self.cfg.max_slice_velocity * self._last_action[:, 1]
                    - 3.3 * (ee_y - self.cfg.food_y))
+        # kinematic board stop: the board is rigid and uncut in the dynamics,
+        # so the blade edge may never be commanded below its surface
+        board_top = self.cfg.board_pos[2] + 0.01
+        blade_h, _ = self._blade_state()
+        at_board = blade_h <= board_top + 0.002
+        v[:, 2] = torch.where(at_board, v[:, 2].clamp(min=0.0), v[:, 2])
+        self._board_reached = at_board
         self._cmd_twist = v
 
     def _apply_action(self):
@@ -185,27 +192,75 @@ class SlicingEnv(DirectRLEnv):
     _mesh_z_offset = 0.02  # DiSECt material top (0.05) -> Isaac surface (0.07)
 
     def _build_food_mesh_prim(self):
+        import numpy as np
         from pxr import Gf, UsdGeom, Vt
         from isaaclab.sim.utils.stage import get_current_stage
         topo = self._bridge.mesh_topology()
-        self._mesh_tris = topo["tris"]
+        self._mesh_tris = np.asarray(topo["tris"], dtype=np.int64)
         stage = get_current_stage()
         mesh = UsdGeom.Mesh.Define(stage, "/World/envs/env_0/FoodMesh")
         mesh.CreateFaceVertexIndicesAttr(
-            Vt.IntArray([i for t in self._mesh_tris for i in t]))
+            Vt.IntArray(self._mesh_tris.ravel().tolist()))
         mesh.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(self._mesh_tris)))
         mesh.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.30, 0.55, 0.20)]))
         mesh.CreateDoubleSidedAttr(True)
+        # authored (welded) normals; subdivision would re-crease the seam
+        mesh.CreateSubdivisionSchemeAttr("none")
+        mesh.SetNormalsInterpolation(UsdGeom.Tokens.vertex)
         self._food_mesh = mesh
+        # weld groups: DiSECt duplicates vertices along the pre-split cut
+        # surface (virtual nodes). Coincident vertices share one normal until
+        # they physically separate, so the intact object renders seamless.
+        pts0 = np.asarray(topo["points"], dtype=np.float64)
+        keys = {}
+        group_id = np.zeros(len(pts0), dtype=np.int64)
+        for i, p in enumerate(np.round(pts0, 4)):
+            k = (p[0], p[1], p[2])
+            group_id[i] = keys.setdefault(k, len(keys))
+        self._weld_group = group_id
+        self._n_groups = len(keys)
         self._update_food_mesh(topo["points"])
 
     def _update_food_mesh(self, d_points):
-        from pxr import Gf, Vt
+        import numpy as np
+        from pxr import Vt
         cx, fy, dz = self.cfg.cut_plane_x, self.cfg.food_y, self._mesh_z_offset
-        pts = Vt.Vec3fArray([
-            Gf.Vec3f(p[0] + cx, -p[2] + fy, p[1] + dz) for p in d_points])
-        self._food_mesh.GetPointsAttr().Set(pts)
-        self._mesh_z_top = max(p[1] for p in d_points) + dz
+        d = np.asarray(d_points, dtype=np.float64)
+        pts = np.stack([d[:, 0] + cx, -d[:, 2] + fy, d[:, 1] + dz], axis=1)
+        self._food_mesh.GetPointsAttr().Set(
+            Vt.Vec3fArray.FromNumpy(pts.astype(np.float32)))
+
+        # welded smooth normals: accumulate face normals per vertex, then sum
+        # over weld groups whose members are still co-located (< 1.5 mm)
+        tris = self._mesh_tris
+        fn = np.cross(pts[tris[:, 1]] - pts[tris[:, 0]],
+                      pts[tris[:, 2]] - pts[tris[:, 0]])
+        vn = np.zeros_like(pts)
+        for c in range(3):
+            np.add.at(vn, tris[:, c], fn)
+        g = self._weld_group
+        gsum = np.zeros((self._n_groups, 3))
+        gmean = np.zeros((self._n_groups, 3))
+        gcnt = np.zeros(self._n_groups)
+        np.add.at(gsum, g, vn)
+        np.add.at(gmean, g, pts)
+        np.add.at(gcnt, g, 1.0)
+        gmean /= np.maximum(gcnt, 1.0)[:, None]
+        spread = np.linalg.norm(pts - gmean[g], axis=1)
+        gspread = np.zeros(self._n_groups)
+        np.maximum.at(gspread, g, spread)
+        welded = gspread[g] < 0.0015
+        vn = np.where(welded[:, None], gsum[g], vn)
+        norms = np.linalg.norm(vn, axis=1, keepdims=True)
+        vn = vn / np.maximum(norms, 1e-9)
+        self._food_mesh.GetNormalsAttr().Set(
+            Vt.Vec3fArray.FromNumpy(vn.astype(np.float32)))
+
+        # stats for scene checks and telemetry
+        self._mesh_z_top = float(pts[:, 2].max())
+        self._mesh_z_min = float(pts[:, 2].min())
+        self._mesh_xy_center = (float(pts[:, 0].mean()), float(pts[:, 1].mean()))
+        self._weld_spread = float(2.0 * gspread.max())
 
     def _bridge_force(self, blade_h, blade_vel):
         # inverse of the frame map above, for the knife pose streamed in
@@ -282,7 +337,9 @@ class SlicingEnv(DirectRLEnv):
 
     def _get_dones(self):
         time_out = self.episode_length_buf >= self.max_episode_length - 1
-        terminated = self._goal_reached | self._collision
+        # the blade reaching the board ends the cut whether or not the
+        # completion signal fired — there is nothing further to simulate
+        terminated = self._goal_reached | self._collision | self._board_reached
         return terminated, time_out
 
     def _reset_idx(self, env_ids):
@@ -303,6 +360,10 @@ class SlicingEnv(DirectRLEnv):
         self._cut_completion[env_ids] = 0.0
         self._goal_reached[env_ids] = False
         self._collision[env_ids] = False
+        if not hasattr(self, "_board_reached"):
+            self._board_reached = torch.zeros(
+                self.num_envs, dtype=torch.bool, device=self.device)
+        self._board_reached[env_ids] = False
         self._latest_force = torch.zeros(self.num_envs, device=self.device)
         if self._force_model is not None:
             self._force_model.reset(env_ids)

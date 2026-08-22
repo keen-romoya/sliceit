@@ -102,11 +102,28 @@ class DisectSession:
         }
 
     def mesh_points(self):
-        """Current deformed FEM node positions (DiSECt frame, y-up)."""
-        return self.sim.state.particle_q.detach().cpu().numpy().round(5).tolist()
+        """Current deformed render vertices (DiSECt frame, y-up): FEM nodes
+        plus the interpolated cut-edge points that carry the re-tessellated
+        band where the surface crosses the cut plane (same construction as
+        DiSECt's own visualizer)."""
+        sim = self.sim
+        ps = sim.state.particle_q.detach().cpu().numpy()
+        ids = sim.model.cut_edge_indices.detach().cpu().numpy()
+        coords = sim.model.cut_edge_coords.detach().cpu().numpy()
+        cut_v = (ps[ids[:, 0]] * (1.0 - coords)[:, None]
+                 + ps[ids[:, 1]] * coords[:, None])
+        return np.vstack([ps, cut_v]).round(5).tolist()
 
     def mesh_topology(self):
-        tris = np.asarray(self.sim.builder.tri_indices).reshape(-1, 3)
+        """Watertight render topology: base surface + cut-band triangles +
+        cut-face caps (above/below), indexed over [nodes; cut-edge points]."""
+        sim = self.sim
+        n = sim.state.particle_q.shape[0]
+        base = np.asarray(sim.builder.tri_indices).reshape(-1, 3)
+        band = sim.model.cut_tri_indices.detach().cpu().numpy().reshape(-1, 3)
+        above = sim.model.cut_virtual_tri_indices_above_cut.detach().cpu().numpy().reshape(-1, 3) + n
+        below = sim.model.cut_virtual_tri_indices_below_cut.detach().cpu().numpy().reshape(-1, 3) + n
+        tris = np.vstack([base, band, above, below])
         return {"tris": tris.tolist(), "points": self.mesh_points()}
 
 
