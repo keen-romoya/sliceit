@@ -80,8 +80,25 @@ def main():
         overlap_xy = (bx1 > food_aabb[0] and bx0 < food_aabb[1]
                       and by1 > food_aabb[2] and by0 < food_aabb[3])
         penetration = max(0.0, food_aabb[5] - kz) if overlap_xy else 0.0
+
+        # clip check: does the RENDERED blade box intersect SOLID material
+        # (left block, or the slice at its current separated position)?
+        eps = 1e-5
+        vx0 = cfg.cut_plane_x
+        vx1 = cfg.cut_plane_x + cfg.knife_size[0]
+        vz0, vz1 = kz, kz + cfg.knife_size[2]
+        sep = cfg.slice_separation * float(env._cut_completion[0])
+        solids = [
+            (fl_c[0] - fl_s[0] / 2, fl_c[0] + fl_s[0] / 2),
+            (cfg.food_right_center[0] - cfg.food_right_size[0] / 2 + sep,
+             cfg.food_right_center[0] + cfg.food_right_size[0] / 2 + sep),
+        ]
+        in_food_yz = (by1 > food_aabb[2] + eps and by0 < food_aabb[3] - eps
+                      and vz0 < food_aabb[5] - eps and vz1 > food_aabb[4] + eps)
+        clips = any(vx1 > s0 + eps and vx0 < s1 - eps for s0, s1 in solids) and in_food_yz
         telemetry.append((step, kx, ky, kz, penetration,
-                          float(env._cut_completion[0]), float(env._latest_force[0])))
+                          float(env._cut_completion[0]), float(env._latest_force[0]),
+                          int(clips)))
         if step % 40 == 0:
             print(f"[play {step:4d}] force {env._latest_force[0]:6.2f} N | "
                   f"completion {env._cut_completion[0]:.2f} | reward {rew.mean():.3f} | "
@@ -94,15 +111,19 @@ def main():
     with open(args.out.replace(".mp4", "_telemetry.csv"), "w", newline="") as f:
         w = csv.writer(f)
         w.writerow(["frame", "blade_x", "blade_y", "blade_edge_z",
-                    "penetration_m", "completion", "force_n"])
+                    "penetration_m", "completion", "force_n", "clips_solid"])
         w.writerows(telemetry)
     pen_frames = [t for t in telemetry if t[4] > 0]
+    clip_frames = [t for t in telemetry if t[7]]
     if pen_frames:
         deepest = max(pen_frames, key=lambda t: t[4])
         print(f"CONTACT: {len(pen_frames)}/{len(telemetry)} frames with blade-food "
               f"intersection; deepest {deepest[4]*1000:.0f} mm at frame {deepest[0]}")
     else:
         print("CONTACT: NONE — blade never intersects the food AABB")
+    print(f"CLIP: {len(clip_frames)}/{len(telemetry)} frames where the rendered "
+          f"blade interpenetrates solid material"
+          + (f" (first at frame {clip_frames[0][0]})" if clip_frames else ""))
     print("PLAY_OK")
     wrapped.close()
 

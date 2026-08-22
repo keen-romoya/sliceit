@@ -33,7 +33,9 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     food_size = (0.15, 0.04, 0.05)    # full x-long block before the split
     food_left_center = (0.8065, 0.174, 0.045)   # [0.745, 0.868]
     food_left_size = (0.123, 0.04, 0.05)
-    food_right_center = (0.8815, 0.174, 0.045)  # [0.868, 0.895] — the slice
+    # slice sits one blade-thickness past the cut plane so the blade occupies
+    # the kerf it cuts and never interpenetrates solid material
+    food_right_center = (0.8895, 0.174, 0.045)  # [0.876, 0.903] — the slice
     food_right_size = (0.027, 0.04, 0.05)
     slice_separation = 0.018          # how far the cut slice drifts at completion 1.0
     food_surface_height = 0.07        # top of food, where cutting force engages

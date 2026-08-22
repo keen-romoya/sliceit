@@ -162,7 +162,9 @@ class SlicingEnv(DirectRLEnv):
             self._slice_prim = stage.GetPrimAtPath("/World/envs/env_0/FoodSliceViz")
         ee_pos = self._robot.data.body_pos_w.torch[0, self._ee_body_idx]
         half_blade = 0.5 * self.cfg.knife_size[2]
-        p = [float(ee_pos[0]), float(ee_pos[1]),
+        # x pinned to the kerf center: the blade renders exactly in the cut it
+        # makes (EE x drift is mm-scale since x is not commanded)
+        p = [self.cfg.cut_plane_x + 0.5 * self.cfg.knife_size[0], float(ee_pos[1]),
              float(ee_pos[2]) - self.cfg.blade_edge_offset[2] + half_blade]
         self._knife_prim.GetAttribute("xformOp:translate").Set(Gf.Vec3d(*p))
         # the cut slice drifts away from the block as the cut progresses
