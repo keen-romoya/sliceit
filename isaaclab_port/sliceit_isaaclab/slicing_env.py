@@ -70,10 +70,19 @@ class SlicingEnv(DirectRLEnv):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.30, 0.15)))
         board.func("/World/envs/env_0/Board", board, translation=self.cfg.board_pos)
 
-        food = sim_utils.CuboidCfg(
-            size=self.cfg.food_size,
+        # food in two halves at the cut plane; the right half (the slice) is a
+        # driven visual whose separation follows cut completion
+        food_l = sim_utils.CuboidCfg(
+            size=self.cfg.food_left_size,
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.30, 0.55, 0.20)))
-        food.func("/World/envs/env_0/Food", food, translation=self.cfg.food_pos)
+        food_l.func("/World/envs/env_0/FoodLeft", food_l,
+                    translation=self.cfg.food_left_center)
+        food_r = sim_utils.CuboidCfg(
+            size=self.cfg.food_right_size,
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.32, 0.58, 0.22)))
+        food_r.func("/World/envs/env_0/FoodSliceViz", food_r,
+                    translation=self.cfg.food_right_center)
+        self._slice_prim = None
 
         # blade visual: plain (non-physics) prim whose USD xform we write each
         # step — physics-tensor pose writes don't reach the renderer, USD
@@ -93,10 +102,15 @@ class SlicingEnv(DirectRLEnv):
 
     def _pre_physics_step(self, actions: torch.Tensor):
         self._last_action = actions.clamp(-1.0, 1.0)
-        # task-space velocity command: press down (world -z), slice along blade x
+        # task-space velocity command: press down (world -z), saw along the
+        # blade's long axis (y). A soft recentering spring keeps the sawing
+        # motion bounded around the cut station (the ROS version tracked a
+        # reference trajectory the same way).
+        ee_y = self._ee_pos_env()[:, 1]
         v = torch.zeros((self.num_envs, 6), device=self.device)
         v[:, 2] = -self.cfg.max_down_velocity * (0.5 * (self._last_action[:, 0] + 1.0))
-        v[:, 0] = self.cfg.max_slice_velocity * self._last_action[:, 1]
+        v[:, 1] = (self.cfg.max_slice_velocity * self._last_action[:, 1]
+                   - 3.3 * (ee_y - self.cfg.food_y))
         self._cmd_twist = v
 
     def _apply_action(self):
@@ -113,10 +127,20 @@ class SlicingEnv(DirectRLEnv):
         self._q_target = q_meas + (self._q_target - q_meas).clamp(-0.08, 0.08)
         self._robot.set_joint_position_target(self._q_target, joint_ids=self._arm_joint_ids)
 
-        # cutting reaction force on the wrist from the DiSECt-derived model
+        # cutting reaction force on the wrist from the DiSECt-derived model,
+        # gated on the blade actually being over the material laterally
         blade_h, blade_vel = self._blade_state()
+        ee = self._ee_pos_env()
+        fl_c, fl_s = self.cfg.food_left_center, self.cfg.food_left_size
+        fr_c, fr_s = self.cfg.food_right_center, self.cfg.food_right_size
+        over_material = (
+            (ee[:, 0] > fl_c[0] - fl_s[0] / 2 - self.cfg.knife_size[0])
+            & (ee[:, 0] < fr_c[0] + fr_s[0] / 2 + self.cfg.knife_size[0])
+            & ((ee[:, 1] - self.cfg.food_y).abs() < fl_s[1] / 2 + self.cfg.knife_size[1] / 2)
+        ).float()
         if self._force_model is not None:
-            f_up, self._cut_completion = self._force_model.step(blade_h, blade_vel[:, 2])
+            f_up, self._cut_completion = self._force_model.step(
+                blade_h, blade_vel[:, 2], engaged=over_material)
         else:
             f_up, self._cut_completion = self._bridge_force(blade_h, blade_vel)
         forces = torch.zeros((self.num_envs, 1, 3), device=self.device)
@@ -133,13 +157,19 @@ class SlicingEnv(DirectRLEnv):
         from pxr import Gf
         if self._knife_prim is None:
             from isaaclab.sim.utils.stage import get_current_stage
-            self._knife_prim = get_current_stage().GetPrimAtPath(
-                "/World/envs/env_0/KnifeViz")
+            stage = get_current_stage()
+            self._knife_prim = stage.GetPrimAtPath("/World/envs/env_0/KnifeViz")
+            self._slice_prim = stage.GetPrimAtPath("/World/envs/env_0/FoodSliceViz")
         ee_pos = self._robot.data.body_pos_w.torch[0, self._ee_body_idx]
         half_blade = 0.5 * self.cfg.knife_size[2]
         p = [float(ee_pos[0]), float(ee_pos[1]),
              float(ee_pos[2]) - self.cfg.blade_edge_offset[2] + half_blade]
         self._knife_prim.GetAttribute("xformOp:translate").Set(Gf.Vec3d(*p))
+        # the cut slice drifts away from the block as the cut progresses
+        sep = self.cfg.slice_separation * float(self._cut_completion[0])
+        sc = self.cfg.food_right_center
+        self._slice_prim.GetAttribute("xformOp:translate").Set(
+            Gf.Vec3d(sc[0] + sep, sc[1], sc[2]))
 
     def _bridge_force(self, blade_h, blade_vel):
         # DiSECt cutting frame: y up, knife centered over the material.

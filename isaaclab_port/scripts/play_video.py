@@ -55,6 +55,14 @@ def main():
 
     obs, _ = wrapped.reset()
     writer = imageio.get_writer(args.out, fps=30, quality=8)
+
+    # numeric contact telemetry: verify blade/food intersection from sim
+    # state per frame instead of judging rendered pixels
+    telemetry = []
+    fl_c, fl_s = cfg.food_left_center, cfg.food_left_size
+    food_aabb = (fl_c[0] - fl_s[0] / 2, cfg.food_right_center[0] + cfg.food_right_size[0] / 2,
+                 fl_c[1] - fl_s[1] / 2, fl_c[1] + fl_s[1] / 2,
+                 fl_c[2] - fl_s[2] / 2, fl_c[2] + fl_s[2] / 2)
     for step in range(args.steps):
         with torch.inference_mode():
             sampled, outputs = runner.agent.act(obs, None, timestep=0, timesteps=args.steps)
@@ -63,14 +71,38 @@ def main():
         frame = env.render()
         if frame is not None:
             writer.append_data(frame)
+        # per-frame numeric telemetry (env 0)
+        blade_h, _ = env._blade_state()
+        ee = env._ee_pos_env()[0]
+        kx, ky, kz = float(ee[0]), float(ee[1]), float(blade_h[0])
+        bx0, bx1 = kx - cfg.knife_size[0] / 2, kx + cfg.knife_size[0] / 2
+        by0, by1 = ky - cfg.knife_size[1] / 2, ky + cfg.knife_size[1] / 2
+        overlap_xy = (bx1 > food_aabb[0] and bx0 < food_aabb[1]
+                      and by1 > food_aabb[2] and by0 < food_aabb[3])
+        penetration = max(0.0, food_aabb[5] - kz) if overlap_xy else 0.0
+        telemetry.append((step, kx, ky, kz, penetration,
+                          float(env._cut_completion[0]), float(env._latest_force[0])))
         if step % 40 == 0:
-            blade_h, _ = env._blade_state()
-            print(f"[play {step:4d}] force max {env._latest_force.max():6.2f} N | "
-                  f"completion {env._cut_completion.mean():.2f} | reward {rew.mean():.3f} | "
-                  f"act0 {actions[:, 0].mean():.2f} act1 {actions[:, 1].mean():.2f} "
-                  f"blade_h {blade_h[0]:.3f}")
+            print(f"[play {step:4d}] force {env._latest_force[0]:6.2f} N | "
+                  f"completion {env._cut_completion[0]:.2f} | reward {rew.mean():.3f} | "
+                  f"blade edge=({kx:.3f},{ky:.3f},{kz:.3f}) "
+                  f"penetration {penetration*1000:.0f} mm")
     writer.close()
     print(f"wrote {args.out}")
+
+    import csv
+    with open(args.out.replace(".mp4", "_telemetry.csv"), "w", newline="") as f:
+        w = csv.writer(f)
+        w.writerow(["frame", "blade_x", "blade_y", "blade_edge_z",
+                    "penetration_m", "completion", "force_n"])
+        w.writerows(telemetry)
+    pen_frames = [t for t in telemetry if t[4] > 0]
+    if pen_frames:
+        deepest = max(pen_frames, key=lambda t: t[4])
+        print(f"CONTACT: {len(pen_frames)}/{len(telemetry)} frames with blade-food "
+              f"intersection; deepest {deepest[4]*1000:.0f} mm at frame {deepest[0]}")
+    else:
+        print("CONTACT: NONE — blade never intersects the food AABB")
     print("PLAY_OK")
     wrapped.close()
 

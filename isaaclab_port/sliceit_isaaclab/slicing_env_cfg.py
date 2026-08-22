@@ -25,16 +25,24 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     robot: ArticulationCfg = UR10e_CFG.replace(prim_path="/World/envs/env_.*/Robot")
 
     # cutting scene geometry (env-local frame), centered under the EE's
-    # start-pose position so the blade meets the food
+    # start-pose position so the blade meets the food. The cut is crosswise:
+    # food long along x, blade plane at cut_plane_x, slicing motion along y.
     board_pos = (0.87, 0.174, 0.01)
-    food_pos = (0.82, 0.174, 0.045)   # cucumber-proxy center
-    food_size = (0.15, 0.04, 0.05)    # x-long cylinder proxy as a box
+    cut_plane_x = 0.868               # EE start x — where the blade descends
+    food_y = 0.174
+    food_size = (0.15, 0.04, 0.05)    # full x-long block before the split
+    food_left_center = (0.8065, 0.174, 0.045)   # [0.745, 0.868]
+    food_left_size = (0.123, 0.04, 0.05)
+    food_right_center = (0.8815, 0.174, 0.045)  # [0.868, 0.895] — the slice
+    food_right_size = (0.027, 0.04, 0.05)
+    slice_separation = 0.018          # how far the cut slice drifts at completion 1.0
     food_surface_height = 0.07        # top of food, where cutting force engages
     completion_depth = 0.045          # blade travel through material = cut done
 
-    # knife: thin blade parented to the wrist; edge offset in EE frame
-    knife_size = (0.20, 0.008, 0.11)
-    blade_edge_offset = (0.0, 0.0, 0.26)  # from wrist_3_link origin to blade edge, along tool z
+    # knife: blade long along y (crosswise cut), thin along x; its top meets
+    # the wrist flange (~0.07 below the wrist origin)
+    knife_size = (0.008, 0.20, 0.17)
+    blade_edge_offset = (0.0, 0.0, 0.20)  # wrist_3_link origin to blade edge (world down)
 
     # control (mirrors SliceIt's compliant task-space commands)
     max_down_velocity = 0.05      # m/s, matches their pressing_velocity range

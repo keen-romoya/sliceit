@@ -35,9 +35,12 @@ class ProfileForceModel:
         self.integrity[env_ids] = 1.0
         self.max_depth_seen[env_ids] = 0.0
 
-    def step(self, blade_height, blade_vel_y):
-        """blade_height: (N,) world height of blade edge. Returns (force_y, cut_completion)."""
-        depth = (self.surface_height - blade_height).clamp(min=0.0)
+    def step(self, blade_height, blade_vel_y, engaged=None):
+        """blade_height: (N,) world height of blade edge; engaged: (N,) 0/1
+        lateral-overlap gate. Returns (force_y, cut_completion)."""
+        if engaged is None:
+            engaged = torch.ones_like(blade_height)
+        depth = (self.surface_height - blade_height).clamp(min=0.0) * engaged
         new_material = (depth - self.max_depth_seen).clamp(min=0.0)
         self.max_depth_seen = torch.maximum(self.max_depth_seen, depth)
 
