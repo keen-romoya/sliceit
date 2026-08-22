@@ -113,16 +113,26 @@ class SlicingEnv(DirectRLEnv):
         v[:, 2] = -self.cfg.max_down_velocity * (0.5 * (self._last_action[:, 0] + 1.0))
         v[:, 1] = (self.cfg.max_slice_velocity * self._last_action[:, 1]
                    - 3.3 * (ee_y - self.cfg.food_y))
-        # kinematic board stop: the board is rigid and uncut in the dynamics,
-        # so the blade edge may never be commanded below its surface
+        # kinematic board stop: the board is rigid and uncut in the dynamics.
+        # Ramp the descent command down over the last 15 mm so PD momentum
+        # cannot carry the blade through the board surface.
         board_top = self.cfg.board_pos[2] + 0.01
         blade_h, _ = self._blade_state()
-        at_board = blade_h <= board_top + 0.002
-        v[:, 2] = torch.where(at_board, v[:, 2].clamp(min=0.0), v[:, 2])
-        self._board_reached = at_board
+        ramp = ((blade_h - (board_top + 0.002)) / 0.015).clamp(0.0, 1.0)
+        v[:, 2] = v[:, 2] * ramp
+        self._board_reached = blade_h <= board_top + 0.004
         self._cmd_twist = v
 
     def _apply_action(self):
+        # re-apply the board-stop ramp at the PHYSICS rate: when the material
+        # breaks, the PD effort that was fighting ~100 N of cutting force can
+        # lunge the arm through the board within a single policy step
+        board_top = self.cfg.board_pos[2] + 0.01
+        blade_h_now, _ = self._blade_state()
+        ramp = ((blade_h_now - (board_top + 0.002)) / 0.015).clamp(0.0, 1.0)
+        self._cmd_twist[:, 2] = (self._cmd_twist[:, 2].clamp(max=0.0) * ramp
+                                 + self._cmd_twist[:, 2].clamp(min=0.0))
+
         # damped least-squares IK: qdot = J^T (J J^T + lambda I)^-1 v
         # fixed-base articulation: jacobian row index is body index - 1
         jac = self._robot.data.body_link_jacobian_w.torch[:, self._ee_body_idx - 1, :, :6]
@@ -133,7 +143,11 @@ class SlicingEnv(DirectRLEnv):
         # velocity; clamp target-measured error to avoid windup on contact
         q_meas = self._robot.data.joint_pos.torch[:, :6]
         self._q_target = self._q_target + qdot.squeeze(-1) * self.cfg.sim.dt
-        self._q_target = q_meas + (self._q_target - q_meas).clamp(-0.08, 0.08)
+        self._q_target = q_meas + (self._q_target - q_meas).clamp(-0.015, 0.015)
+        # at board level, dump stored PD-target energy so the arm cannot
+        # spring downward when the cutting force disappears
+        at_board = (blade_h_now <= board_top + 0.004).unsqueeze(-1)
+        self._q_target = torch.where(at_board, q_meas, self._q_target)
         self._robot.set_joint_position_target(self._q_target, joint_ids=self._arm_joint_ids)
 
         # cutting reaction force on the wrist from the DiSECt-derived model,
@@ -149,14 +163,18 @@ class SlicingEnv(DirectRLEnv):
         ).float()
         if self._force_model is not None:
             f_up, self._cut_completion = self._force_model.step(
-                blade_h, blade_vel[:, 2], engaged=over_material)
+                blade_h, blade_vel[:, 2], engaged=over_material,
+                saw_speed=blade_vel[:, 1].abs())
         else:
             f_up, self._cut_completion = self._bridge_force(blade_h, blade_vel)
         forces = torch.zeros((self.num_envs, 1, 3), device=self.device)
         forces[:, 0, 2] = f_up  # material pushes back up on the blade
         torques = torch.zeros_like(forces)
+        # is_global: the API defaults to the BODY frame, and the wrist body's
+        # z-axis points tool-down — without this flag the reaction force is
+        # applied downward, sucking the blade into the material
         self._robot.set_external_force_and_torque(
-            forces, torques, body_ids=[self._ee_body_idx])
+            forces, torques, body_ids=[self._ee_body_idx], is_global=True)
         self._latest_force = f_up
 
         # keep the blade visual glued below the wrist (USD write, env 0 only —
@@ -320,7 +338,8 @@ class SlicingEnv(DirectRLEnv):
 
         force = self._latest_force
         r_distance = -torch.tanh(5.0 * dist)
-        r_force = -1.0 / (1.0 + torch.exp(-force / 2.0 + 3.0))
+        r_force = -1.0 / (1.0 + torch.exp(
+            -(force - self.cfg.force_penalty_center) / self.cfg.force_penalty_scale))
         r_jerk = (-jerk).clamp(-1.0, 0.0)
         r_vel = torch.norm(ee_vel, dim=-1).clamp(0.0, 1.0) - 1.0
 
@@ -330,7 +349,10 @@ class SlicingEnv(DirectRLEnv):
         reward = (w[0] * r_distance + w[1] * r_force + w[2] * r_jerk + w[3] * r_vel
                   + self.cfg.cost_step)
 
-        self._goal_reached = self._cut_completion >= 1.0
+        # blade at the board with the bulk of the springs failed = cut done
+        # (the damage-based completion metric lags full depth slightly)
+        self._goal_reached = (self._cut_completion >= 1.0) | (
+            self._board_reached & (self._cut_completion > 0.6))
         self._collision = force > self.cfg.max_force
         reward = torch.where(self._goal_reached, reward + self.cfg.cost_done, reward)
         reward = torch.where(self._collision, reward + self.cfg.cost_collision, reward)

@@ -14,6 +14,8 @@ parser.add_argument("--steps", type=int, default=240)
 parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--out", default="rollout.mp4")
 parser.add_argument("--force-model", default="profile", choices=["profile", "bridge"])
+parser.add_argument("--episode-s", type=float, default=None,
+                    help="override episode length [s] (e.g. long cuts for video)")
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -41,6 +43,8 @@ def main():
     cfg = SlicingEnvCfg()
     cfg.scene.num_envs = args.num_envs
     cfg.force_model = args.force_model
+    if args.episode_s is not None:
+        cfg.episode_length_s = args.episode_s
     # rgb_array rendering uses cfg.viewer for its camera, not the GUI viewport
     cfg.viewer.eye = (1.55, 1.05, 0.55)
     cfg.viewer.lookat = (0.87, 0.174, 0.14)
@@ -59,6 +63,8 @@ def main():
     writer = imageio.get_writer(args.out, fps=30, quality=8)
     from force_hud import ForceHud
     hud = None  # sized from the first rendered frame
+    prev_composited = None
+    HOLD_FRAMES = 45  # freeze 1.5 s on the final frame of each cut
 
     # numeric contact telemetry: verify blade/food intersection from sim
     # state per frame instead of judging rendered pixels
@@ -92,7 +98,14 @@ def main():
             strip = hud.render(float(env._cut_completion[0]),
                                (surface - float(blade_h_now[0])) * 1000.0)
             import numpy as np
-            writer.append_data(np.vstack([frame, strip]))
+            composited = np.vstack([frame, strip])
+            # the frame rendered on a terminating step already shows the
+            # reset — hold the previous frame so the cut result registers
+            if bool((terminated | truncated).any()) and prev_composited is not None:
+                for _ in range(HOLD_FRAMES):
+                    writer.append_data(prev_composited)
+            writer.append_data(composited)
+            prev_composited = composited
         # per-frame numeric telemetry (env 0)
         blade_h, _ = env._blade_state()
         ee = env._ee_pos_env()[0]
@@ -125,13 +138,19 @@ def main():
 
         # scene-vs-dynamics assertions (see scene_checks.py)
         checker.begin_frame(step)
+        if not bool((terminated | truncated).any()):
+            checker.blade_speed_plausible(
+                kz, telemetry[-1][3] if telemetry else None, 1.0 / 30.0,
+                max_cmd=cfg.max_down_velocity)
         checker.blade_vs_board((vx0, vx1, by0, by1, vz0, vz1))
         checker.blade_attachment(vz1, float(ee[2]))
         if cfg.force_model == "bridge":
             contact_started = contact_started or float(env._latest_force[0]) > 0.1
             checker.mesh_on_board(env._mesh_z_min, env._mesh_xy_center)
             checker.seam_integrity(env._weld_spread, contact_started)
-            checker.bridge_tracking(getattr(env, "_bridge_tracking_err", 0.0))
+            # episode-boundary frames legitimately re-synchronize the sims
+            if not bool((terminated | truncated).any()):
+                checker.bridge_tracking(getattr(env, "_bridge_tracking_err", 0.0))
         else:
             checker.solid_clip(clips)
         telemetry.append((step, kx, ky, kz, penetration,

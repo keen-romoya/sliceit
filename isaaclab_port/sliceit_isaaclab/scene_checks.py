@@ -111,6 +111,18 @@ class SceneChecker:
         if tracking_err_m > tol:
             self._record("bridge_tracking", tracking_err_m)
 
+    def blade_speed_plausible(self, blade_z, prev_blade_z, dt, max_cmd=0.04, margin=3.0):
+        """The blade may never move faster than the controller can command
+        (within a tracking margin). A violation means an unmodeled force is
+        driving the arm — the failure mode where a wrong-frame or wrong-sign
+        force accelerates the blade instead of resisting it."""
+        self.checks_run["blade_speed_plausible"] += 1
+        if prev_blade_z is None:
+            return
+        speed = abs(blade_z - prev_blade_z) / dt
+        if speed > max_cmd * margin:
+            self._record("blade_speed_plausible", speed)
+
     def solid_clip(self, clips):
         """Proxy-geometry mode: rendered blade must not interpenetrate solid
         (uncut) material boxes."""

@@ -24,6 +24,7 @@ class ProfileForceModel:
         data = np.load(profile_npz)
         self.depths = torch.tensor(data["depth"], device=device, dtype=torch.float32)
         self.forces = torch.tensor(data["force"], device=device, dtype=torch.float32)
+        self.reference_speed = float(data.get("reference_speed", 0.05))
         self.surface_height = surface_height
         self.completion_depth = completion_depth
         self.num_envs = num_envs
@@ -35,9 +36,10 @@ class ProfileForceModel:
         self.integrity[env_ids] = 1.0
         self.max_depth_seen[env_ids] = 0.0
 
-    def step(self, blade_height, blade_vel_y, engaged=None):
+    def step(self, blade_height, blade_vel_y, engaged=None, saw_speed=None):
         """blade_height: (N,) world height of blade edge; engaged: (N,) 0/1
-        lateral-overlap gate. Returns (force_y, cut_completion)."""
+        lateral-overlap gate; saw_speed: (N,) |lateral blade speed| for the
+        friction term. Returns (force_y, cut_completion)."""
         if engaged is None:
             engaged = torch.ones_like(blade_height)
         depth = (self.surface_height - blade_height).clamp(min=0.0) * engaged
@@ -47,10 +49,19 @@ class ProfileForceModel:
         idx = torch.searchsorted(
             self.depths, depth.clamp(max=self.depths[-1])).clamp(max=len(self.depths) - 1)
         base_force = self.forces[idx]
-        # only resist while pressing into uncut material
+        # only resist while pressing into uncut material; force scales with
+        # press speed relative to the profile's reference speed, so easing off
+        # genuinely reduces force (viscous-cutting approximation) — this is
+        # what makes force-modulating behavior learnable
         pressing = (blade_vel_y < 0.0).float()
         cutting = (new_material > 0.0).float()
-        force_y = base_force * self.integrity * pressing * cutting
+        speed_scale = (-blade_vel_y / self.reference_speed).clamp(0.0, 1.5)
+        force_y = base_force * self.integrity * pressing * cutting * speed_scale
+        # sawing friction: the calibrated DiSECt material has high sdf_kf, so
+        # lateral blade motion adds force proportional to normal force x saw
+        # speed (coefficient fit from bridge-vs-profile force discrepancy)
+        if saw_speed is not None:
+            force_y = force_y * (1.0 + 0.6 * (saw_speed / 0.05).clamp(0.0, 2.0))
         # crack propagation: integrity decays with newly cut depth
         self.integrity = (self.integrity - new_material / max(self.completion_depth, 1e-6)).clamp(min=0.0)
         completion = (self.max_depth_seen / self.completion_depth).clamp(max=1.0)

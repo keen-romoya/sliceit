@@ -47,7 +47,7 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     blade_edge_offset = (0.0, 0.0, 0.20)  # wrist_3_link origin to blade edge (world down)
 
     # control (mirrors SliceIt's compliant task-space commands)
-    max_down_velocity = 0.05      # m/s, matches their pressing_velocity range
+    max_down_velocity = 0.04      # m/s (reduced: calibrated material is stiff)
     max_slice_velocity = 0.10     # m/s along the blade axis
     ik_damping = 0.05
 
@@ -58,18 +58,27 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     bridge_host = "127.0.0.1"
     bridge_port = 8299
     bridge_substeps = 100         # DiSECt steps (dt 4e-5) per policy step
-    # maps Isaac blade-edge height to DiSECt knife position:
-    # surface offset (isaac 0.07 vs disect sphere top 0.05) + knife spine
-    # half-height (DiSECt knife pos is the spine center, edge = pos + 0.029)
-    bridge_height_offset = 0.049
+    # maps Isaac blade-edge height to DiSECt knife position: scene surface
+    # offset only (isaac food top 0.07 <-> disect force onset at y=0.05,
+    # verified by servo-tracked force probing; the old 0.049 was fit against
+    # the pre-servo motion bug)
+    bridge_height_offset = 0.02
 
     # reward weights — port of cost_utils.slicing_with_vel
-    w_dist = 1.0
+    w_dist = 1.5
     w_force = 1.0
     w_jerk = 0.2
     w_vel = 0.2
     cost_done = 10.0
     cost_collision = -10.0
-    cost_step = -0.01
-    max_force = 50.0              # |F| beyond this terminates as collision (N)
+    cost_step = -0.02
+    # calibrated-apple-appropriate force budget: the LS-DYNA-calibrated
+    # material genuinely needs ~70-105 N to cut through (force is depth-
+    # dominated); 50 N was a soft-produce number that made completion
+    # impossible past ~15 mm
+    max_force = 120.0
+    # s-shaped force penalty centered for the calibrated material's working
+    # range (~10-45 N) so the gradient rewards easing off, not just avoidance
+    force_penalty_center = 40.0
+    force_penalty_scale = 10.0
     force_hist_len = 6
