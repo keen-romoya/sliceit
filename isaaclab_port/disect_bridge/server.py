@@ -101,6 +101,14 @@ class DisectSession:
             "sim_time": sim.sim_time,
         }
 
+    def mesh_points(self):
+        """Current deformed FEM node positions (DiSECt frame, y-up)."""
+        return self.sim.state.particle_q.detach().cpu().numpy().round(5).tolist()
+
+    def mesh_topology(self):
+        tris = np.asarray(self.sim.builder.tri_indices).reshape(-1, 3)
+        return {"tris": tris.tolist(), "points": self.mesh_points()}
+
 
 def main():
     ap = argparse.ArgumentParser()
@@ -124,7 +132,11 @@ def main():
                     elif cmd == "step":
                         out = session.step(req["pos"], req["vel"],
                                            int(req.get("substeps", 50)))
+                        if req.get("include_mesh"):
+                            out["mesh_points"] = session.mesh_points()
                         resp = {"ok": True, **out}
+                    elif cmd == "mesh_topology":
+                        resp = {"ok": True, **session.mesh_topology()}
                     elif cmd == "info":
                         resp = {"ok": True, "dt": session.settings.sim_dt,
                                 "duration": session.settings.sim_duration}

@@ -18,9 +18,13 @@ class DisectClient:
     def reset(self):
         return self._rpc({"cmd": "reset"})
 
-    def step(self, pos, vel, substeps=50):
+    def step(self, pos, vel, substeps=50, include_mesh=False):
         return self._rpc({"cmd": "step", "pos": list(map(float, pos)),
-                          "vel": list(map(float, vel)), "substeps": substeps})
+                          "vel": list(map(float, vel)), "substeps": substeps,
+                          "include_mesh": include_mesh})
+
+    def mesh_topology(self):
+        return self._rpc({"cmd": "mesh_topology"})
 
     def info(self):
         return self._rpc({"cmd": "info"})

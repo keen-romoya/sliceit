@@ -13,6 +13,7 @@ parser.add_argument("--num_envs", type=int, default=4)
 parser.add_argument("--steps", type=int, default=240)
 parser.add_argument("--checkpoint", required=True)
 parser.add_argument("--out", default="rollout.mp4")
+parser.add_argument("--force-model", default="profile", choices=["profile", "bridge"])
 AppLauncher.add_app_launcher_args(parser)
 args = parser.parse_args()
 
@@ -39,6 +40,7 @@ from sliceit_isaaclab.slicing_env_cfg import SlicingEnvCfg
 def main():
     cfg = SlicingEnvCfg()
     cfg.scene.num_envs = args.num_envs
+    cfg.force_model = args.force_model
     # rgb_array rendering uses cfg.viewer for its camera, not the GUI viewport
     cfg.viewer.eye = (1.55, 1.05, 0.55)
     cfg.viewer.lookat = (0.87, 0.174, 0.14)
@@ -96,6 +98,10 @@ def main():
         in_food_yz = (by1 > food_aabb[2] + eps and by0 < food_aabb[3] - eps
                       and vz0 < food_aabb[5] - eps and vz1 > food_aabb[4] + eps)
         clips = any(vx1 > s0 + eps and vx0 < s1 - eps for s0, s1 in solids) and in_food_yz
+        if cfg.force_model == "bridge":
+            # food geometry is the streamed DiSECt mesh: measure against it
+            penetration = max(0.0, env._mesh_z_top - kz)
+            clips = False  # the mesh is genuinely cut; no proxy to clip
         telemetry.append((step, kx, ky, kz, penetration,
                           float(env._cut_completion[0]), float(env._latest_force[0]),
                           int(clips)))

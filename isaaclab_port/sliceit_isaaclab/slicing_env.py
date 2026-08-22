@@ -48,6 +48,7 @@ class SlicingEnv(DirectRLEnv):
             from disect_bridge.client import DisectClient
             self._bridge = DisectClient(self.cfg.bridge_host, self.cfg.bridge_port)
             self._force_model = None
+            self._build_food_mesh_prim()
         else:
             from disect_bridge.profile_model import ProfileForceModel
             self._bridge = None
@@ -70,19 +71,20 @@ class SlicingEnv(DirectRLEnv):
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.45, 0.30, 0.15)))
         board.func("/World/envs/env_0/Board", board, translation=self.cfg.board_pos)
 
-        # food in two halves at the cut plane; the right half (the slice) is a
-        # driven visual whose separation follows cut completion
-        food_l = sim_utils.CuboidCfg(
-            size=self.cfg.food_left_size,
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.30, 0.55, 0.20)))
-        food_l.func("/World/envs/env_0/FoodLeft", food_l,
-                    translation=self.cfg.food_left_center)
-        food_r = sim_utils.CuboidCfg(
-            size=self.cfg.food_right_size,
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.32, 0.58, 0.22)))
-        food_r.func("/World/envs/env_0/FoodSliceViz", food_r,
-                    translation=self.cfg.food_right_center)
+        # food visuals. Bridge mode renders DiSECt's actual deforming FEM mesh
+        # (streamed per step), so the box proxies are only for profile mode.
         self._slice_prim = None
+        if self.cfg.force_model != "bridge":
+            food_l = sim_utils.CuboidCfg(
+                size=self.cfg.food_left_size,
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.30, 0.55, 0.20)))
+            food_l.func("/World/envs/env_0/FoodLeft", food_l,
+                        translation=self.cfg.food_left_center)
+            food_r = sim_utils.CuboidCfg(
+                size=self.cfg.food_right_size,
+                visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.32, 0.58, 0.22)))
+            food_r.func("/World/envs/env_0/FoodSliceViz", food_r,
+                        translation=self.cfg.food_right_center)
 
         # blade visual: plain (non-physics) prim whose USD xform we write each
         # step — physics-tensor pose writes don't reach the renderer, USD
@@ -159,7 +161,8 @@ class SlicingEnv(DirectRLEnv):
             from isaaclab.sim.utils.stage import get_current_stage
             stage = get_current_stage()
             self._knife_prim = stage.GetPrimAtPath("/World/envs/env_0/KnifeViz")
-            self._slice_prim = stage.GetPrimAtPath("/World/envs/env_0/FoodSliceViz")
+            if self.cfg.force_model != "bridge":
+                self._slice_prim = stage.GetPrimAtPath("/World/envs/env_0/FoodSliceViz")
         ee_pos = self._robot.data.body_pos_w.torch[0, self._ee_body_idx]
         half_blade = 0.5 * self.cfg.knife_size[2]
         # x pinned to the kerf center: the blade renders exactly in the cut it
@@ -167,21 +170,52 @@ class SlicingEnv(DirectRLEnv):
         p = [self.cfg.cut_plane_x + 0.5 * self.cfg.knife_size[0], float(ee_pos[1]),
              float(ee_pos[2]) - self.cfg.blade_edge_offset[2] + half_blade]
         self._knife_prim.GetAttribute("xformOp:translate").Set(Gf.Vec3d(*p))
-        # the cut slice drifts away from the block as the cut progresses
-        sep = self.cfg.slice_separation * float(self._cut_completion[0])
-        sc = self.cfg.food_right_center
-        self._slice_prim.GetAttribute("xformOp:translate").Set(
-            Gf.Vec3d(sc[0] + sep, sc[1], sc[2]))
+        # profile mode only: the cut slice drifts away as the cut progresses
+        # (bridge mode renders the real DiSECt mesh instead)
+        if self._slice_prim is not None:
+            sep = self.cfg.slice_separation * float(self._cut_completion[0])
+            sc = self.cfg.food_right_center
+            self._slice_prim.GetAttribute("xformOp:translate").Set(
+                Gf.Vec3d(sc[0] + sep, sc[1], sc[2]))
+
+    # ------------------------------------------------------ disect frame map
+    # DiSECt: y up, knife descends along -y, blade length along z.
+    # Isaac:  z up, blade length along y. Right-handed map:
+    #   isaac = (d_x + cut_plane_x, -d_z + food_y, d_y + mesh_z_offset)
+    _mesh_z_offset = 0.02  # DiSECt material top (0.05) -> Isaac surface (0.07)
+
+    def _build_food_mesh_prim(self):
+        from pxr import Gf, UsdGeom, Vt
+        from isaaclab.sim.utils.stage import get_current_stage
+        topo = self._bridge.mesh_topology()
+        self._mesh_tris = topo["tris"]
+        stage = get_current_stage()
+        mesh = UsdGeom.Mesh.Define(stage, "/World/envs/env_0/FoodMesh")
+        mesh.CreateFaceVertexIndicesAttr(
+            Vt.IntArray([i for t in self._mesh_tris for i in t]))
+        mesh.CreateFaceVertexCountsAttr(Vt.IntArray([3] * len(self._mesh_tris)))
+        mesh.CreateDisplayColorAttr(Vt.Vec3fArray([Gf.Vec3f(0.30, 0.55, 0.20)]))
+        mesh.CreateDoubleSidedAttr(True)
+        self._food_mesh = mesh
+        self._update_food_mesh(topo["points"])
+
+    def _update_food_mesh(self, d_points):
+        from pxr import Gf, Vt
+        cx, fy, dz = self.cfg.cut_plane_x, self.cfg.food_y, self._mesh_z_offset
+        pts = Vt.Vec3fArray([
+            Gf.Vec3f(p[0] + cx, -p[2] + fy, p[1] + dz) for p in d_points])
+        self._food_mesh.GetPointsAttr().Set(pts)
+        self._mesh_z_top = max(p[1] for p in d_points) + dz
 
     def _bridge_force(self, blade_h, blade_vel):
-        # DiSECt cutting frame: y up, knife centered over the material.
-        # Lateral food<->robot registration (the cutting_board_disect TF in the
-        # Gazebo version) is collapsed to "blade centered" for now; height is
-        # mapped via the surface offset between the two scenes.
+        # inverse of the frame map above, for the knife pose streamed in
+        ee = self._ee_pos_env()[0]
         disect_y = float(blade_h[0]) - self.cfg.bridge_height_offset
-        pos = [0.0, disect_y, 0.0]
-        vel = [float(blade_vel[0, 0]), float(blade_vel[0, 2]), 0.0]
-        out = self._bridge.step(pos, vel, substeps=self.cfg.bridge_substeps)
+        pos = [0.0, disect_y, -(float(ee[1]) - self.cfg.food_y)]
+        vel = [0.0, float(blade_vel[0, 2]), -float(blade_vel[0, 1])]
+        out = self._bridge.step(pos, vel, substeps=self.cfg.bridge_substeps,
+                                include_mesh=True)
+        self._update_food_mesh(out["mesh_points"])
         f = torch.tensor([out["force_norm"]], device=self.device)
         c = torch.tensor([out["cut_completion"]], device=self.device)
         return f, c
