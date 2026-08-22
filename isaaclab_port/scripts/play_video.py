@@ -57,6 +57,8 @@ def main():
 
     obs, _ = wrapped.reset()
     writer = imageio.get_writer(args.out, fps=30, quality=8)
+    from force_hud import ForceHud
+    hud = None  # sized from the first rendered frame
 
     # numeric contact telemetry: verify blade/food intersection from sim
     # state per frame instead of judging rendered pixels
@@ -81,7 +83,16 @@ def main():
         obs, rew, terminated, truncated, info = wrapped.step(actions)
         frame = env.render()
         if frame is not None:
-            writer.append_data(frame)
+            if hud is None:
+                hud = ForceHud(frame.shape[1], args.steps)
+            blade_h_now, _ = env._blade_state()
+            surface = getattr(env, "_mesh_z_top", cfg.food_surface_height)
+            hud.add(step, float(env._latest_force[0]),
+                    was_reset=bool((terminated | truncated).any()))
+            strip = hud.render(float(env._cut_completion[0]),
+                               (surface - float(blade_h_now[0])) * 1000.0)
+            import numpy as np
+            writer.append_data(np.vstack([frame, strip]))
         # per-frame numeric telemetry (env 0)
         blade_h, _ = env._blade_state()
         ee = env._ee_pos_env()[0]
@@ -120,6 +131,7 @@ def main():
             contact_started = contact_started or float(env._latest_force[0]) > 0.1
             checker.mesh_on_board(env._mesh_z_min, env._mesh_xy_center)
             checker.seam_integrity(env._weld_spread, contact_started)
+            checker.bridge_tracking(getattr(env, "_bridge_tracking_err", 0.0))
         else:
             checker.solid_clip(clips)
         telemetry.append((step, kx, ky, kz, penetration,

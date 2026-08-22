@@ -271,6 +271,9 @@ class SlicingEnv(DirectRLEnv):
         out = self._bridge.step(pos, vel, substeps=self.cfg.bridge_substeps,
                                 include_mesh=True)
         self._update_food_mesh(out["mesh_points"])
+        ka = out.get("knife_actual")
+        self._bridge_tracking_err = (
+            abs(ka[1] - pos[1]) + abs(ka[2] - pos[2]) if ka else 0.0)
         f = torch.tensor([out["force_norm"]], device=self.device)
         c = torch.tensor([out["cut_completion"]], device=self.device)
         return f, c

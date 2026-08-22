@@ -102,6 +102,15 @@ class SceneChecker:
             self._record("watertight", float(len(bad)))
         return len(bad)
 
+    def bridge_tracking(self, tracking_err_m, tol=0.005):
+        """Co-simulation coherence: the DiSECt knife must be where the Isaac
+        blade is. A divergence means the rendered blade and the force-
+        producing knife are different objects (the failure mode where the
+        cut looks effortless because the FEM knife never touched anything)."""
+        self.checks_run["bridge_tracking"] += 1
+        if tracking_err_m > tol:
+            self._record("bridge_tracking", tracking_err_m)
+
     def solid_clip(self, clips):
         """Proxy-geometry mode: rendered blade must not interpenetrate solid
         (uncut) material boxes."""

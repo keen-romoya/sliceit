@@ -48,9 +48,18 @@ class DisectSession:
         # profile so create_sim() is happy even when only co-simulating.
         if not settings.get("groundtruth", None):
             settings.groundtruth = "dataset/forces/sphere_fine_resultant_force_xyz.csv"
+        settings.initial_y = 0.075  # sane default; knife pose is driven externally
+        settings.velocity_y = -0.05
+        # DiSECt returns zero knife force once sim_time exceeds sim_duration
+        # (its cutting schedule is pre-sized over the configured duration).
+        # Co-simulated episodes run on external time, so make it long.
+        settings.sim_duration = 20.0
         best_params = None
         if params_path:
             best_params = pickle.load(open(params_path, "rb"))
+            # initial_y is a calibration-only parameter (knife start height);
+            # the bridge streams the knife pose, so drop it
+            best_params.pop("initial_y", None)
             print(f"loaded calibrated params: {best_params}")
         self.settings = settings
         self.create_sim = create_sim
@@ -59,10 +68,15 @@ class DisectSession:
         self.reset()
 
     def reset(self):
+        # apply calibrated values the same way the Optuna trainer does per
+        # trial (create_sim's best_params path narrows bounds and can clash
+        # with config defaults)
         sim, _params = self.create_sim(
             self.settings, "disect_bridge", requires_grad=False,
-            best_params=self.best_params, device=self.device,
+            best_params=None, device=self.device,
             verbose=False, shared_params=True)
+        if self.best_params:
+            sim.load_optimized_parameters(optimized_params=self.best_params)
         sim.init_parameters()
         sim.init_sim_structures_()
         del sim.model
@@ -79,13 +93,17 @@ class DisectSession:
         sim = self.sim
         if self.initial_knife_pos is None:
             self.initial_knife_pos = np.asarray(pos, dtype=np.float32)
-        # ConstantLinearVelocityMotion evaluates initial_pos + t * v with
-        # ABSOLUTE sim time, so compensate to make the knife sit at `pos` now.
-        pos_t = torch.tensor(pos, device=self.device, dtype=torch.float32)
-        vel_t = torch.tensor(vel, device=self.device, dtype=torch.float32)
+        # FreeFloatingKnifeMotion.update_state writes the knife POSITION only
+        # while sim_time < 2*dt; afterwards the knife integrates its VELOCITY.
+        # So drive it as a velocity servo: reach the commanded pose (plus
+        # feedforward) by the end of this step window.
+        window = substeps * sim.sim_dt
+        target = np.asarray(pos, dtype=np.float64) + np.asarray(vel, dtype=np.float64) * window
+        actual = sim.state.joint_q[0:3].detach().cpu().numpy()
+        v_track = np.clip((target - actual) / window, -0.5, 0.5)
         sim.motion = ConstantLinearVelocityMotion(
-            initial_pos=pos_t - sim.sim_time * vel_t,
-            linear_velocity=vel_t)
+            initial_pos=torch.tensor(pos, device=self.device, dtype=torch.float32),
+            linear_velocity=torch.tensor(v_track, device=self.device, dtype=torch.float32))
         for _ in range(substeps):
             sim.simulation_step()
         knife_f = sim.state.knife_f
@@ -94,11 +112,13 @@ class DisectSession:
         force_norm = float(torch.sum(torch.norm(knife_f, dim=1)).item())
         ke = sim.state.cut_spring_ke
         cut_completion = float(1.0 - (torch.mean(ke) / sim.model.cut_spring_stiffness.mean()).item()) if ke.numel() else 1.0
+        knife_pose = sim.state.body_X_sm[sim.model.knife_link_index]
         return {
             "force": force,
             "force_norm": force_norm,
             "cut_completion": max(0.0, min(1.0, cut_completion)),
             "sim_time": sim.sim_time,
+            "knife_actual": knife_pose[:3].detach().cpu().numpy().round(4).tolist(),
         }
 
     def mesh_points(self):
