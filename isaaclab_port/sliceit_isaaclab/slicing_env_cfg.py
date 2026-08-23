@@ -31,15 +31,15 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     cut_plane_x = 0.868               # EE start x — where the blade descends
     food_y = 0.174
     food_size = (0.15, 0.04, 0.05)    # full x-long block before the split
-    food_left_center = (0.8065, 0.174, 0.045)   # [0.745, 0.868]
-    food_left_size = (0.123, 0.04, 0.05)
+    food_left_center = (0.8065, 0.174, 0.0335)  # [0.745, 0.868]
+    food_left_size = (0.123, 0.04, 0.027)
     # slice sits one blade-thickness past the cut plane so the blade occupies
     # the kerf it cuts and never interpenetrates solid material
-    food_right_center = (0.8895, 0.174, 0.045)  # [0.876, 0.903] — the slice
-    food_right_size = (0.027, 0.04, 0.05)
+    food_right_center = (0.8895, 0.174, 0.0335) # [0.876, 0.903] — the slice
+    food_right_size = (0.027, 0.04, 0.027)
     slice_separation = 0.018          # how far the cut slice drifts at completion 1.0
-    food_surface_height = 0.07        # top of food, where cutting force engages
-    completion_depth = 0.045          # blade travel through material = cut done
+    food_surface_height = 0.0454      # cucumber top (board 0.02 + mesh height 0.0254)
+    completion_depth = 0.024          # blade travel through material = cut done
 
     # knife: blade long along y (crosswise cut), thin along x; its top meets
     # the wrist flange (~0.07 below the wrist origin)
@@ -54,7 +54,7 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     # force model: "profile" (vectorized, distilled from DiSECt) or
     # "bridge" (live DiSECt co-sim over TCP; requires num_envs == 1)
     force_model = "profile"
-    force_profile_path = "force_profile_apple.npz"
+    force_profile_path = "force_profile_cucumber.npz"
     bridge_host = "127.0.0.1"
     bridge_port = 8299
     bridge_substeps = 100         # DiSECt steps (dt 4e-5) per policy step
@@ -62,7 +62,8 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     # offset only (isaac food top 0.07 <-> disect force onset at y=0.05,
     # verified by servo-tracked force probing; the old 0.049 was fit against
     # the pre-servo motion bug)
-    bridge_height_offset = 0.02
+    bridge_height_offset = -0.0084  # cucumber: onset probe (disect 0.0538 <-> isaac 0.0454)
+    mesh_z_offset = 0.02          # disect ground (0) -> isaac board top (0.02)
 
     # reward weights — port of cost_utils.slicing_with_vel
     w_dist = 1.5
@@ -76,9 +77,9 @@ class SlicingEnvCfg(DirectRLEnvCfg):
     # material genuinely needs ~70-105 N to cut through (force is depth-
     # dominated); 50 N was a soft-produce number that made completion
     # impossible past ~15 mm
-    max_force = 120.0
+    max_force = 60.0                  # sat_c profile peaks 57.5 N at ref speed
     # s-shaped force penalty centered for the calibrated material's working
     # range (~10-45 N) so the gradient rewards easing off, not just avoidance
-    force_penalty_center = 40.0
-    force_penalty_scale = 10.0
+    force_penalty_center = 15.0
+    force_penalty_scale = 6.0
     force_hist_len = 6

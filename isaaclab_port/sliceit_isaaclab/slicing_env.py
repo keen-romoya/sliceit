@@ -212,7 +212,6 @@ class SlicingEnv(DirectRLEnv):
     # DiSECt: y up, knife descends along -y, blade length along z.
     # Isaac:  z up, blade length along y. Right-handed map:
     #   isaac = (d_x + cut_plane_x, -d_z + food_y, d_y + mesh_z_offset)
-    _mesh_z_offset = 0.02  # DiSECt material top (0.05) -> Isaac surface (0.07)
 
     def _build_food_mesh_prim(self):
         import numpy as np
@@ -247,7 +246,7 @@ class SlicingEnv(DirectRLEnv):
     def _update_food_mesh(self, d_points):
         import numpy as np
         from pxr import Vt
-        cx, fy, dz = self.cfg.cut_plane_x, self.cfg.food_y, self._mesh_z_offset
+        cx, fy, dz = self.cfg.cut_plane_x, self.cfg.food_y, self.cfg.mesh_z_offset
         d = np.asarray(d_points, dtype=np.float64)
         pts = np.stack([d[:, 0] + cx, -d[:, 2] + fy, d[:, 1] + dz], axis=1)
         self._food_mesh.GetPointsAttr().Set(

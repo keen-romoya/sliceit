@@ -36,7 +36,7 @@ import torch
 
 
 class DisectSession:
-    def __init__(self, disect_root, config_path, params_path=None, device="cuda"):
+    def __init__(self, disect_root, config_path, params_path=None, device="cuda", groundtruth=None):
         sys.path.insert(0, disect_root)
         os.chdir(disect_root)
         from disect.cutting import load_settings, create_sim
@@ -46,7 +46,9 @@ class DisectSession:
         settings.sim_dt = 4e-5
         # groundtruth is only needed for calibration; reuse the ANSYS apple
         # profile so create_sim() is happy even when only co-simulating.
-        if not settings.get("groundtruth", None):
+        if groundtruth:
+            settings.groundtruth = groundtruth
+        elif not settings.get("groundtruth", None):
             settings.groundtruth = "dataset/forces/sphere_fine_resultant_force_xyz.csv"
         settings.initial_y = 0.075  # sane default; knife pose is driven externally
         settings.velocity_y = -0.05
@@ -152,10 +154,13 @@ def main():
     ap.add_argument("--config", default="examples/config/ansys_sphere_apple.json")
     ap.add_argument("--disect-root", default="/root/DiSECt-sliceit")
     ap.add_argument("--params", default=None, help="pickled Optuna best_params")
+    ap.add_argument("--groundtruth", default=None,
+                    help="override the config groundtruth path (docker paths in osx configs)")
     ap.add_argument("--port", type=int, default=8299)
     args = ap.parse_args()
 
-    session = DisectSession(args.disect_root, args.config, args.params)
+    session = DisectSession(args.disect_root, args.config, args.params,
+                            groundtruth=args.groundtruth)
 
     class Handler(socketserver.StreamRequestHandler):
         def handle(self):

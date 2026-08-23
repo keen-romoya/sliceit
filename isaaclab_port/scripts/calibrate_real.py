@@ -22,6 +22,9 @@ parser.add_argument("--veggie", default="cucumber",
                     choices=["cucumber", "potato", "tomato"])
 parser.add_argument("--trials", type=int, default=60)
 parser.add_argument("--adam-iters", type=int, default=15)
+parser.add_argument("--pin-initial-y", type=float, default=None,
+                    help="fix the knife start height (contact onset is geometry, "
+                         "not material — pin it so the material params fit the curve)")
 args = parser.parse_args()
 
 GROUNDTRUTH = {
@@ -44,8 +47,16 @@ os.makedirs(f"log/{experiment_name}/plots", exist_ok=True)
 os.makedirs(f"log/{experiment_name}/params", exist_ok=True)
 save_settings(settings, f"log/{experiment_name}/settings.json")
 
+if args.pin_initial_y is not None:
+    settings.initial_y = args.pin_initial_y
+
 sim, parameters = create_sim(settings, experiment_name, requires_grad=False,
                              device="cuda", verbose=False, shared_params=True)
+if args.pin_initial_y is not None:
+    p = parameters["initial_y"]
+    p.low = args.pin_initial_y - 5e-4
+    p.high = args.pin_initial_y + 5e-4
+    p.set_value(args.pin_initial_y)
 best_params = optuna_trainer(sim, parameters, logger, n_trials=args.trials)
 print("Optuna best:", best_params)
 optuna_pkl = f"log/{experiment_name}/best_optuna_optimized_tensors.pkl"
